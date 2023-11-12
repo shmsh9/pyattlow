@@ -1,4 +1,6 @@
 from enum import Enum
+import l2capsocket
+import asyncio
 
 ATT_CID = 4
 
@@ -34,6 +36,9 @@ class ATT_HDR_OPCODE(Enum):
     ATT_READ_MUTIPLE_VARIABLE_RSP = 0x21
     ATT_MUTIPLE_HANDLE_VALUE_NTF  = 0x22
     ATT_SIGNED_WRITE_COMMAND      = 0xd2
+    
+    def values():
+        return [x.value for x in ATT_HDR_OPCODE]
 
 class ATT_ERRCODE(Enum):
     ATT_ERRCODE_INVALID_HANDLE                   = 0x01
@@ -57,6 +62,10 @@ class ATT_ERRCODE(Enum):
     ATT_ERRCODE_VALUE_NOT_ALLOW                  = 0x13
     ATT_ERRCODE_APPLICATION_ERROR                = 0x80
 
+    def values():
+        return [x.value for x in ATT_HDR_OPCODE]
+
+
 class AttPDU():
     _buff = None
     opcode = None
@@ -65,6 +74,8 @@ class AttPDU():
     def __init__(self, buff):
         self._buff = buff
         self.opcode = self._buff[0]
+        if self.opcode not in ATT_HDR_OPCODE.values():
+            raise Exception(f"invalid opcode {self.opcode} for AttPDU")
         self.param = self._buff[1::]
     
     def __str__(self):
@@ -82,14 +93,22 @@ class AttErrResp(AttPDU):
         if self.opcode != ATT_HDR_OPCODE.ATT_ERROR_RSP.value:
             raise Exception(f"invalid opcode for ATT_ERROR_RSP {self.opcode}")
         self.err_opcode = self.param[0]
+        if self.err_opcode not in ATT_HDR_OPCODE.values():
+            raise Exception(f"invalid error opcode {self.err_code}")
+
         self.err_handle = (self.param[1] << 8 | self.param[2])
         self.err_code = self.param[3]
+        if self.err_code not in ATT_ERRCODE.values():
+            raise Exception(f"invalid error code {self.err_code}")
+
 
 class AttReadResp(AttPDU):
+    handle = None
     def __init__(self, buff):
         super().__init__(buff)
         if self.opcode != ATT_HDR_OPCODE.ATT_READ_RSP.value:
             raise Exception(f"invalid opcode for ATT_READ_RSP {self.opcode}")
+        self.handle = self.param[0]
 
 class AttReadReq(AttPDU):
     _buff = None
@@ -126,3 +145,52 @@ class AttEnableNotif(AttWriteReq):
     def __init__(self, handle):
         super().__init__(handle, [0x01, 0x00])
 
+
+class AttClient():
+    _sock = None
+    _resp_read = {}
+
+    def __init__(self, mac):
+        self._sock = l2capsocket.l2capsocket()
+        self._sock.bind(("00:00:00:00:00:00", ATT_CID))
+        self._sock.connect((mac, ATT_CID))
+        loop = asyncio.get_event_loop()
+        loop.add_reader(self._sock._sock, self._read_callback)
+        
+    def write(self, handle, request):
+        self._sock.write(
+            AttWriteReq(handle, request).raw()
+        )
+    
+    async def read(self, handle, timeout=1):
+        self._sock.write(
+            AttReadReq(handle).raw()
+        )
+        i = 0
+        while not self._resp_read.get(handle):
+            await asyncio.sleep(1)
+            i += 1
+            if i == timeout:
+                raise Exception(f"timeout for read on handle {handle}")
+        r = self._resp_read[handle]
+        self._resp_read[handle] = None
+        return r
+
+    def _read_callback(self):
+        r = AttPDU(self._sock.read())
+        
+        if r.opcode == ATT_HDR_OPCODE.ATT_READ_RSP.value:
+            r = AttReadResp(r._buff)
+            if self._resp_read.get(r.handle):
+                self._resp_read[r.handle].append(r)
+            else:
+                self._resp_read[r.handle] = [r]
+            pass
+        
+        if r.opcode == ATT_HDR_OPCODE.ATT_ERROR_RSP.value:
+            r = AttErrResp(r._buff)
+            print(f"error received : {r}")
+
+    
+    def __del__(self):
+        self._sock.close()

@@ -2,7 +2,6 @@ import socket
 import re
 import errno
 from ctypes import *
-from typing import Any
 
 libc = CDLL("libc.so.6")
 
