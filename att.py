@@ -82,24 +82,24 @@ class AttPDU():
         return str(vars(self))
     
     def raw(self):
-        return [int(x) for x in self._buff]
+        return [(int(x) & 0xff) for x in self._buff]
 
 class AttErrResp(AttPDU):
-    err_opcode = None
+    error_opcode = None
     err_handle = None
-    err_code = None
+    error_code = None
     def __init__(self, buff):
         super().__init__(buff)
         if self.opcode != ATT_HDR_OPCODE.ATT_ERROR_RSP.value:
             raise Exception(f"invalid opcode for ATT_ERROR_RSP {self.opcode}")
-        self.err_opcode = self.param[0]
-        if self.err_opcode not in ATT_HDR_OPCODE.values():
-            raise Exception(f"invalid error opcode {self.err_code}")
+        self.error_opcode = self.param[0]
+        if self.error_opcode not in ATT_HDR_OPCODE.values():
+            raise Exception(f"invalid error opcode {self.error_opcode}")
 
-        self.err_handle = (self.param[1] << 8 | self.param[2])
-        self.err_code = self.param[3]
-        if self.err_code not in ATT_ERRCODE.values():
-            raise Exception(f"invalid error code {self.err_code}")
+        self.err_handle = (self.param[2] << 8 | self.param[1] & 0xff) & 0xffff
+        self.error_code = self.param[3]
+        if self.error_code not in ATT_ERRCODE.values():
+            raise Exception(f"invalid error code {self.error_code}")
 
 
 class AttReadResp(AttPDU):
@@ -119,8 +119,8 @@ class AttReadReq(AttPDU):
         self.handle = handle
         self._buff = [
             ATT_HDR_OPCODE.ATT_READ_REQ.value,
-            (handle >> 8) & 0xff,
-            (handle & 0xff)
+            (handle & 0xff),
+            (handle >> 8) & 0xff
         ]
         super().__init__(self._buff)
 
@@ -134,21 +134,36 @@ class AttWriteReq(AttPDU):
         self.handle = handle
         self._buff = [
             ATT_HDR_OPCODE.ATT_WRITE_REQ.value,
-            (handle >> 8) & 0xff,
-            (handle & 0xff)
+            (handle & 0xff),
+            (handle >> 8) & 0xff
         ]
         self.request = request
         self._buff.extend([(int(x) & 0xff) for x in request])
         super().__init__(self._buff)
 
-class AttEnableNotif(AttWriteReq):
-    def __init__(self, handle):
-        super().__init__(handle, [0x01, 0x00])
+class AttFindByTypeValueReq(AttPDU):
+    def __init__(self, buff):
+        super().__init__(buff)
+        if self.opcode != ATT_HDR_OPCODE.ATT_FIND_BY_TYPE_VALUE_REQ.value:
+            raise Exception(f"invalid opcode for ATT_FIND_BY_TYPE_VALUE_REQ {self.opcode}")
+        self.start_handle = ( (self.param[1] << 8) | self.param[0] & 0xff ) & 0xffff
+        self.end_handle = ( (self.param[3] << 8) | self.param[2] & 0xff ) & 0xffff
+        self.uuid = ( (self.param[5] << 8) | self.param[4] & 0xff ) & 0xffff
+        self.value = self.param[6::]
 
+class AttHandleValueNotif(AttPDU):
+    def __init__(self, buff):
+        super().__init__(buff)
+        if self.opcode != ATT_HDR_OPCODE.ATT_HANDLE_VALUE_NTF.value:
+            raise Exception(f"invalid opcode for ATT_HANDLE_VALUE_NTF {self.opcode}")
+        self.handle = ( (self.param[1] << 8) | self.param[0] & 0xff ) & 0xffff
+        self.data = self.param[2::]
 
 class AttClient():
     _sock = None
     _resp_read = {}
+    _write_has_responded = False
+    _notif_callbacks = {}
 
     def __init__(self, mac):
         self._sock = l2capsocket.l2capsocket()
@@ -157,11 +172,19 @@ class AttClient():
         loop = asyncio.get_event_loop()
         loop.add_reader(self._sock._sock, self._read_callback)
         
-    def write(self, handle, request):
+    async def notify(self, handle, cb):
+        await self.write(handle+1, [0x01, 0x00])
+        self._notif_callbacks[handle] = cb
+
+    async def write(self, handle, request):
+        self._write_has_responded = False
+        r = AttWriteReq(handle, request)
         self._sock.write(
-            AttWriteReq(handle, request).raw()
+            r.raw()
         )
-    
+        while not self._write_has_responded:
+            await asyncio.sleep(0.1)
+
     async def read(self, handle, timeout=1):
         self._sock.write(
             AttReadReq(handle).raw()
@@ -179,6 +202,15 @@ class AttClient():
     def _read_callback(self):
         r = AttPDU(self._sock.read())
         
+        if r.opcode == ATT_HDR_OPCODE.ATT_HANDLE_VALUE_NTF.value:
+            r = AttHandleValueNotif(r._buff)
+            r.handle = (r.param[1] << 8 | r.param[0] & 0xff) & 0xffff
+            if not self._notif_callbacks.get(r.handle):
+                print(f"unhandled notification : {r}")
+            else:
+                self._notif_callbacks[r.handle](r.data)
+            return
+        
         if r.opcode == ATT_HDR_OPCODE.ATT_READ_RSP.value:
             r = AttReadResp(r._buff)
             if self._resp_read.get(r.handle):
@@ -186,11 +218,40 @@ class AttClient():
             else:
                 self._resp_read[r.handle] = [r]
             pass
-        
+            return
+
+        if r.opcode == ATT_HDR_OPCODE.ATT_WRITE_RSP.value:
+            self._write_has_responded = True
+            print(f"write response : {r}")
+            return
+
         if r.opcode == ATT_HDR_OPCODE.ATT_ERROR_RSP.value:
             r = AttErrResp(r._buff)
-            print(f"error received : {r}")
+            print(f"received error : {r}")
+            return
 
+        if r.opcode == ATT_HDR_OPCODE.ATT_FIND_BY_TYPE_VALUE_REQ.value:
+            r = AttFindByTypeValueReq(r._buff)
+            resp = AttErrResp([
+                ATT_HDR_OPCODE.ATT_ERROR_RSP.value,
+                ATT_HDR_OPCODE.ATT_FIND_BY_TYPE_VALUE_REQ.value,
+                0x00, 0x00, #handle
+                ATT_ERRCODE.ATT_ERRCODE_REQUEST_NOT_SUPPORT.value
+            ])
+            print(f"received ATT_FIND_BY_TYPE_VALUE_REQ : {r}\nresponding feature not supported: {resp}")
+            self._sock.write(resp.raw())
+            """
+            resp = [
+                ATT_HDR_OPCODE.ATT_READ_BY_TYPE_REQ.value,
+                0x37, 0x00, #starting handle
+                0x40, 0x00, #ending handle
+                0x03, 0x28  #UUID
+            ]
+            self._sock.write(resp)
+            """
+            return
+
+        print(f"received unhandled : {r}")
     
     def __del__(self):
         self._sock.close()

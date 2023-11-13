@@ -1,36 +1,27 @@
 import asyncio
 from att import AttClient
 
-DST = "E8:31:CD:02:0F:56"
-"""
-s = l2capsocket()
-s.bind(("00:00:00:00:00:00", att.ATT_CID))
-s.connect((DST, att.ATT_CID))
+DST = "60:8A:10:5C:40:9C"
 
-garbage = att.AttReadReq(handle=0x60)
-print(garbage)
-s.write(garbage.raw())
-r = att.AttErrResp(s.read())
-print(r)
+def notif_callback(data):
 
-garbage2 = att.AttEnableNotif(handle=0x60)
-print(garbage2)
-s.write(garbage2.raw())
-r = att.AttErrResp(s.read())
-print(r)
+    print(f"notif_callback : {''.join([chr(x) for x in data])}")
 
-not_garbage = att.AttPDU([0x10,0x01,0x00,0xff,0xff,0x00,0x28])
-print(not_garbage)
-s.write(not_garbage.raw())
-r = att.AttPDU(s.read())
-print(r)
-"""
 async def main():
     client = AttClient(DST)
-    while True:
-        client.write(0x10, [0xaa, 0xbb])
-        print(await client.read(0x10, timeout=5))
-        #await asyncio.sleep(0.1)
+    await asyncio.sleep(3)
+
+    await client.notify(0x0037, notif_callback)
+
+    await client.write(0x003a, [0x70, 0x61, 0x72, 0x6b, 0x78, 0x39, 0xd])       #FW info
+    """
+    await client.write(0x003a, [0x70, 0x61, 0x72, 0x6b, 0x77, 0x31, 0x33, 0x0d]) #T2
+    await asyncio.sleep(3)
+    await client.write(0x003a, [0x70, 0x61, 0x72, 0x6b, 0x77, 0x31, 0x31, 0x0d]) #Backward
+    await asyncio.sleep(3)
+    await client.write(0x003a, [0x70, 0x61, 0x72, 0x6b, 0x77, 0x31, 0x31, 0x0d]) #Backward
+    await asyncio.sleep(5)
+    """
 
 asyncio.run(main())
 
