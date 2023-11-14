@@ -162,10 +162,10 @@ class AttHandleValueNotif(AttPDU):
 class AttClient():
     _sock = None
     _resp_read = {}
-    _write_has_responded = False
+    _write_has_responded = None
     _notif_callbacks = {}
-
     def __init__(self, mac):
+        self._write_has_responded = asyncio.Event()
         self._sock = l2capsocket.l2capsocket()
         self._sock.bind(("00:00:00:00:00:00", ATT_CID))
         self._sock.connect((mac, ATT_CID))
@@ -177,13 +177,13 @@ class AttClient():
         self._notif_callbacks[handle] = cb
 
     async def write(self, handle, request):
-        self._write_has_responded = False
         r = AttWriteReq(handle, request)
         self._sock.write(
             r.raw()
         )
-        while not self._write_has_responded:
-            await asyncio.sleep(0.1)
+        await self._write_has_responded.wait()
+        #while not self._write_has_responded:
+        #    await asyncio.sleep(0.1)
 
     async def read(self, handle, timeout=1):
         self._sock.write(
@@ -221,7 +221,7 @@ class AttClient():
             return
 
         if r.opcode == ATT_HDR_OPCODE.ATT_WRITE_RSP.value:
-            self._write_has_responded = True
+            self._write_has_responded.set()
             print(f"write response : {r}")
             return
 
@@ -252,6 +252,3 @@ class AttClient():
             return
 
         print(f"received unhandled : {r}")
-    
-    def __del__(self):
-        self._sock.close()
